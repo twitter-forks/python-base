@@ -175,6 +175,13 @@ class CommandTokenSource(object):
             expiry=parse_rfc3339(data['credential']['token_expiry']))
 
 
+class ConfigurationWithRefreshHook(Configuration):
+    def get_api_key_with_prefix(self, identifier):
+        if self.refresh_api_key_hook is not None:
+            self.refresh_api_key_hook(self)
+        return super(ConfigurationWithRefreshHook, self).get_api_key_with_prefix(identifier)
+
+
 class KubeConfigLoader(object):
 
     def __init__(self, config_dict, active_context=None,
@@ -476,6 +483,8 @@ class KubeConfigLoader(object):
                 logging.error('exec: missing token field in plugin output')
                 return None
             self.token = "Bearer %s" % status['token']
+            if 'expirationTimestamp' in status:
+                self.expiry = parse_rfc3339(status['expirationTimestamp'])
             return True
         except Exception as e:
             logging.error(str(e))
@@ -540,6 +549,13 @@ class KubeConfigLoader(object):
             # Note: this line runs for GCP auth tokens as well, but this entry
             # will not be updated upon GCP token refresh.
             client_configuration.api_key['authorization'] = self.token
+
+            def _refresh_api_key(client_configuration):
+                if ('expiry' in self.__dict__ and
+                        self.expiry < datetime.datetime.now(tz=UTC)):
+                    self._load_authentication()
+                    self._set_config(client_configuration)
+            client_configuration.refresh_api_key_hook = _refresh_api_key
         # copy these keys directly from self to configuration object
         keys = ['host', 'ssl_ca_cert', 'cert_file', 'key_file', 'verify_ssl']
         for key in keys:
@@ -739,7 +755,7 @@ def load_kube_config(config_file=None, context=None,
         persist_config=persist_config)
 
     if client_configuration is None:
-        config = type.__call__(Configuration)
+        config = type.__call__(ConfigurationWithRefreshHook)
         loader.load_and_set(config)
         Configuration.set_default(config)
     else:
